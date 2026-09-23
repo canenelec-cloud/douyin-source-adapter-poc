@@ -1,0 +1,68 @@
+name: Douyin PoC
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install yt-dlp requests
+      - name: Generate and Run
+        run: |
+          cat << 'EOF' > poc.py
+          import subprocess, json, requests, time, csv, os
+          from datetime import datetime, timezone
+          target = "https://www.douyin.com/user/MS4wLjABAAAAOe21P8IusTbt9FvhH9H7kxbzi8HikIeeQKpQek2aTsY"
+          now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+          
+          try: yt_ver = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True).stdout.strip()
+          except: yt_ver = "unknown"
+          
+          cmd = ["yt-dlp", "--dump-json", "--flat-playlist", "--playlist-end", "3", "--no-warnings", target]
+          res = subprocess.run(cmd, capture_output=True, text=True)
+          
+          videos = []
+          err_type, err_code = "", ""
+          if res.returncode != 0:
+              if "403" in res.stderr: err_type, err_code = "403", "HTTP_403"
+              elif "captcha" in res.stderr or "验证码" in res.stderr: err_type, err_code = "captcha", "CAPTCHA"
+              else: err_type, err_code = "extraction", f"EXIT_{res.returncode}"
+          else:
+              for line in res.stdout.strip().split('\n'):
+                  try:
+                      d = json.loads(line)
+                      vid = d.get("id") or d.get("url","").split("/")[-1]
+                      videos.append({"id": vid, "url": f"https://www.douyin.com/video/{vid}"})
+                  except: pass
+              if not videos: err_type, err_code = "empty", "NO_VIDEOS"
+          
+          audio_ok = False
+          if videos:
+              try:
+                  res2 = subprocess.run(["yt-dlp", "-f", "ba/b", "-g", videos[0]["url"]], capture_output=True, text=True, timeout=20)
+                  if res2.returncode == 0:
+                      u = res2.stdout.strip().split('\n')[0]
+                      audio_ok = requests.head(u, headers={"User-Agent":"Mozilla/5.0"}, timeout=10).status_code in [200, 206, 302]
+              except: pass
+          
+          os.makedirs("logs", exist_ok=True)
+          is_new = not os.path.exists("logs/poc_log.csv")
+          with open("logs/poc_log.csv", "a", newline="", encoding="utf-8") as f:
+              w = csv.writer(f)
+              if is_new: w.writerow(["run_time","success","videos","latest_id","audio_ok","err_type","err_code","yt_ver"])
+              w.writerow([now, bool(videos), len(videos), videos[0]["id"] if videos else "", audio_ok, err_type, err_code, yt_ver])
+          EOF
+          python poc.py
+      - name: Save Log
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add logs/poc_log.csv
+          git commit -m "update log" || echo "No changes"
+          git push
